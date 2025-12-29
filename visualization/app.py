@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Union
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 # Add project root to Python path to access mitre_mapping module
 project_root = Path(__file__).parent.parent
@@ -23,14 +25,13 @@ import pandas as pd
 import streamlit as st
 from mitre_mapping.mitre_attack_mapper import SubTechnique, Technique, get_mapper
 
-
 def sort_tactics(tactics_to_sort: Union[List[str], set]) -> List[str]:
     """
     Filter and sort tactics based on canonical MITRE ATT&CK Enterprise order.
-
+    
     Args:
         tactics_to_sort: Tactic names to sort
-
+        
     Returns:
         List of tactics sorted by canonical order, containing only tactics
         that are present in the input
@@ -65,9 +66,28 @@ st.title("Detection Rules Viewer")
 # Load JSON data
 @st.cache_data
 def load_detection_rules(classified_output_file: str) -> pd.DataFrame:
-    """Load detection rules from JSON file."""
-    with open(classified_output_file, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    """
+    Load detection rules from a JSON file or URL.
+    
+    Args:
+        classified_output_file: Path to local file or HTTP/HTTPS URL
+        
+    Returns:
+        DataFrame containing the detection rules
+    """
+    # Check if the input is a URL
+    parsed_url = urlparse(classified_output_file)
+    is_url = parsed_url.scheme in ("http", "https")
+    
+    if is_url:
+        # Load from URL
+        with urlopen(classified_output_file) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    else:
+        # Load from local file
+        with open(classified_output_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    
     rules_df = pd.DataFrame(data)
     rules_df = rules_df.rename(
         columns={"id": "rule_id", "relevant_techniques": "technique_ids"}
@@ -172,9 +192,9 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Detection Rules Viewer")
     parser.add_argument(
         "--classified-output-file-path",
-        default="visualization/classified_output.json",
+        default="output/classification/classified_output.json",
         help=(
-            "Path to classified output file "
+            "Path to classified output file or URL "
             "(default: output/classification/classified_output.json)"
         ),
     )
@@ -191,7 +211,12 @@ except SystemExit:
 
 
 # Load the data - each row is a rule with a list of technique IDs
-input_rule_classfication_df = load_detection_rules(args.classified_output_file_path)
+# Use secrets if available, otherwise fall back to command line argument
+classified_output_path = args.classified_output_file_path
+if "classified_output_file_path" in st.secrets:
+    classified_output_path = st.secrets["classified_output_file_path"]
+
+input_rule_classfication_df = load_detection_rules(classified_output_path)
 input_rule_classfication_df = input_rule_classfication_df.sort_values("rule_id")
 
 # Explode multiple technique IDs into separate rows - useful for tactic/technique/kill-chain aggregations
@@ -229,7 +254,7 @@ rules_df = (
 )
 
 # Display the data
-st.write(f"Showing {len(rules_df)} detection rules!")
+st.write(f"Showing {len(rules_df)} detection rules")
 
 # Create Tactic Coverage chart - Horizontal Stacked by Technique
 st.subheader("Tactic Coverage")
@@ -263,7 +288,7 @@ tactic_chart = (
             title="Total rule mappings",
             axis=alt.Axis(
                 format="d",  # Format as integer (no decimals)
-            ),
+            )
         ),
         y=alt.Y(
             "tactic_name:N",
@@ -300,9 +325,7 @@ tactic_kc_df = tactic_kc_df[
 ]
 
 # Extract tactic names and kill-chain names
-tactic_kc_df["tactic_name"] = tactic_kc_df["tactics"].apply(
-    lambda t: t.name if t else None
-)
+tactic_kc_df["tactic_name"] = tactic_kc_df["tactics"].apply(lambda t: t.name if t else None)
 tactic_kc_df["kill_chain_name"] = tactic_kc_df["kill_chain_stages"].apply(
     lambda kc: f"[{kc.kill_chain_step_number}] {kc.name}" if kc else None
 )
