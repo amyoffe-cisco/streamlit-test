@@ -172,7 +172,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Detection Rules Viewer")
     parser.add_argument(
         "--classified-output-file-path",
-        default="output/classification/classified_output.json",
+        default="visualization/classified_output.json",
         help=(
             "Path to classified output file "
             "(default: output/classification/classified_output.json)"
