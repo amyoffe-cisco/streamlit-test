@@ -368,7 +368,8 @@ heatmap = (
             "tactic_name:N",
             title="Tactic",
             sort=tactic_sort_order,
-            axis=alt.Axis(labelLimit=200),
+            scale=alt.Scale(domain=tactic_sort_order),  # Force all tactics to appear on axis
+            axis=alt.Axis(labelLimit=300, labelOverlap=False),
         ),
         color=alt.Color(
             "rule_count:Q",
@@ -381,7 +382,7 @@ heatmap = (
             alt.Tooltip("rule_count:Q", title="Number of Rules"),
         ],
     )
-    .properties(height=400, width=800)
+    .properties(height=600, width=800)
 )
 
 st.altair_chart(heatmap, use_container_width=True)
