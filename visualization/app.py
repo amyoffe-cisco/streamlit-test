@@ -25,13 +25,14 @@ import pandas as pd
 import streamlit as st
 from mitre_mapping.mitre_attack_mapper import SubTechnique, Technique, get_mapper
 
+
 def sort_tactics(tactics_to_sort: Union[List[str], set]) -> List[str]:
     """
     Filter and sort tactics based on canonical MITRE ATT&CK Enterprise order.
-    
+
     Args:
         tactics_to_sort: Tactic names to sort
-        
+
     Returns:
         List of tactics sorted by canonical order, containing only tactics
         that are present in the input
@@ -68,17 +69,17 @@ st.title("Detection Rules Viewer")
 def load_detection_rules(classified_output_file: str) -> pd.DataFrame:
     """
     Load detection rules from a JSON file or URL.
-    
+
     Args:
         classified_output_file: Path to local file or HTTP/HTTPS URL
-        
+
     Returns:
         DataFrame containing the detection rules
     """
     # Check if the input is a URL
     parsed_url = urlparse(classified_output_file)
     is_url = parsed_url.scheme in ("http", "https")
-    
+
     if is_url:
         # Load from URL
         with urlopen(classified_output_file) as response:
@@ -87,7 +88,7 @@ def load_detection_rules(classified_output_file: str) -> pd.DataFrame:
         # Load from local file
         with open(classified_output_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-    
+
     rules_df = pd.DataFrame(data)
     rules_df = rules_df.rename(
         columns={"id": "rule_id", "relevant_techniques": "technique_ids"}
@@ -96,92 +97,96 @@ def load_detection_rules(classified_output_file: str) -> pd.DataFrame:
     return rules_df
 
 
-def count_techniques(df: pd.DataFrame) -> Dict[str, int]:
-    """Count the frequency of each technique across all rules."""
-    counts: Dict[str, int] = {}
-    for techniques_list in df["ts_or_sts_pretty"]:
-        for technique in techniques_list:
-            counts[technique] = counts.get(technique, 0) + 1
-    return counts
+def enrich_technique_data(row: pd.Series) -> pd.Series:
+    """
+    Enrich a row with technique/subtechnique data from MITRE ATT&CK.
 
-
-# Add new columns using MitreAttackMapper
-def enrich_row_with_mitre_data(row: pd.Series) -> pd.Series:
-    """Enrich a row with MITRE ATT&CK data from mapper."""
+    This adds:
+    - ts_or_st_pretty: Pretty formatted technique or subtechnique string
+    - tactics: List of tactic objects associated with this technique
+    """
     mapper = get_mapper()
+    technique_id = row["technique_id"]
 
-    # Get the technique/subtechnique ID
-    t_or_st_id = row["technique_id"] if row["technique_id"] else []
+    if not technique_id:
+        row["ts_or_st_pretty"] = None
+        row["tactics"] = []
+        return row
 
-    # Initialize vars for rich objects
-    technique = None
-    subtechnique = None
-    tactics_list = []
-    kill_chain_stages_list = []
-
-    # Initialize vars for pretty formatted strings
-    ts_or_st_pretty = None
-    tactics_pretty = []
-    kill_chain_pretty = []
-
-    if "." in t_or_st_id:
+    if "." in technique_id:
         # It's a sub-technique
-        sub_tech = mapper.get_sub_technique(t_or_st_id)
+        sub_tech = mapper.get_sub_technique(technique_id)
         if sub_tech:
-            subtechnique = sub_tech
             # Format: "[T1098.001] Account Manipulation > Additional Cloud Credentials"
-            ts_or_st_pretty = (
+            row["ts_or_st_pretty"] = (
                 f"[{sub_tech.id}] {sub_tech.technique.name} > {sub_tech.name}"
             )
-
             # Get tactics from parent technique
-            parent_technique = sub_tech.technique
-            for tactic in parent_technique.tactics:
-                if tactic not in tactics_list:
-                    tactics_list.append(tactic)
-                    # Add kill chain stages for this tactic
-                    for kc_stage in tactic.kill_chain_stages:
-                        if kc_stage not in kill_chain_stages_list:
-                            kill_chain_stages_list.append(kc_stage)
+            row["tactics"] = sub_tech.technique.tactics
+        else:
+            row["ts_or_st_pretty"] = None
+            row["tactics"] = []
     else:
         # It's a technique
-        tech = mapper.get_technique(t_or_st_id)
+        tech = mapper.get_technique(technique_id)
         if tech:
-            technique = tech
             # Format: "[T1234] Foo"
-            ts_or_st_pretty = f"[{tech.id}] {tech.name}"
+            row["ts_or_st_pretty"] = f"[{tech.id}] {tech.name}"
+            row["tactics"] = tech.tactics
+        else:
+            row["ts_or_st_pretty"] = None
+            row["tactics"] = []
 
-            # Get tactics from technique
-            for tactic in tech.tactics:
-                if tactic not in tactics_list:
-                    tactics_list.append(tactic)
-                    # Add kill chain stages for this tactic
-                    for kc_stage in tactic.kill_chain_stages:
-                        if kc_stage not in kill_chain_stages_list:
-                            kill_chain_stages_list.append(kc_stage)
+    return row
 
-    # Format tactics pretty strings: "[TA0005] Defense Evasion"
-    tactics_pretty = [f"[{tactic.id}] {tactic.name}" for tactic in tactics_list]
 
-    # Format kill chain pretty strings: "[3] Delivery"
-    # Sort by kill_chain_step_number
-    kill_chain_stages_list_sorted = sorted(
-        kill_chain_stages_list, key=lambda kc: kc.kill_chain_step_number
-    )
-    kill_chain_pretty = [
-        f"[{kc.kill_chain_step_number}] {kc.name}"
-        for kc in kill_chain_stages_list_sorted
-    ]
+def enrich_tactic_data(row: pd.Series) -> pd.Series:
+    """
+    Enrich a row with tactic data.
 
-    # Add new columns to the row
-    row["t_or_st_id"] = t_or_st_id
-    row["technique"] = technique
-    row["subtechnique"] = subtechnique
-    row["tactics"] = tactics_list
-    row["kill_chain_stages"] = kill_chain_stages_list_sorted
-    row["ts_or_st_pretty"] = ts_or_st_pretty
-    row["tactics_pretty"] = tactics_pretty
-    row["kill_chain_pretty"] = kill_chain_pretty
+    This adds:
+    - tactic_id: Tactic ID (e.g., TA0005)
+    - tactic_pretty: Pretty formatted tactic string
+    - kill_chain_stages: List of kill chain stage objects for this tactic
+    """
+    tactic = row["tactic"]
+
+    # Check if tactic is not NaN/None and has the expected attributes
+    if tactic is not None and not pd.isna(tactic) and hasattr(tactic, "id"):
+        row["tactic_id"] = tactic.id
+        row["tactic_pretty"] = f"[{tactic.id}] {tactic.name}"
+        row["kill_chain_stages"] = tactic.kill_chain_stages
+    else:
+        row["tactic_id"] = None
+        row["tactic_pretty"] = None
+        row["kill_chain_stages"] = []
+
+    return row
+
+
+def enrich_kill_chain_data(row: pd.Series) -> pd.Series:
+    """
+    Enrich a row with kill chain stage data.
+
+    This adds:
+    - kill_chain_id: Kill chain step number
+    - kill_chain_pretty: Pretty formatted kill chain string
+    """
+    kc_stage = row["kill_chain_stage"]
+
+    # Check if kc_stage is not NaN/None and has the expected attributes
+    if (
+        kc_stage is not None
+        and not pd.isna(kc_stage)
+        and hasattr(kc_stage, "kill_chain_step_number")
+    ):
+        row["kill_chain_id"] = kc_stage.kill_chain_step_number
+        row["kill_chain_pretty"] = (
+            f"[{kc_stage.kill_chain_step_number}] {kc_stage.name}"
+        )
+    else:
+        row["kill_chain_id"] = None
+        row["kill_chain_pretty"] = None
 
     return row
 
@@ -219,35 +224,98 @@ if "classified_output_file_path" in st.secrets:
 input_rule_classfication_df = load_detection_rules(classified_output_path)
 input_rule_classfication_df = input_rule_classfication_df.sort_values("rule_id")
 
-# Explode multiple technique IDs into separate rows - useful for tactic/technique/kill-chain aggregations
+# Enrich the data with full MITRE ATT&CK metadata
+
+# Step 1: Explode technique_ids to get one row per (rule_id, technique_id)
 rule_techniques_df = input_rule_classfication_df.explode("technique_ids").rename(
     columns={"technique_ids": "technique_id"}
 )
+# Enrich with technique-level data (ts_or_st_pretty, tactics list)
+rule_techniques_df = rule_techniques_df.apply(enrich_technique_data, axis=1)
 
-# Enrich each row with MITRE ATT&CK data
-rule_techniques_df = rule_techniques_df.apply(enrich_row_with_mitre_data, axis=1)
+# Step 2: Explode tactics to get one row per (rule_id, technique_id, tactic_id)
+rule_tactics_df = (
+    rule_techniques_df.explode("tactics").rename(columns={"tactics": "tactic"}).copy()
+)
+# Enrich with tactic-level data (tactic_id, tactic_pretty, kill_chain_stages list)
+rule_tactics_df = rule_tactics_df.apply(enrich_tactic_data, axis=1)
 
-# Group by rule_id and aggregate all the rule's metadata into a single row - useful for rule-level aggregations
+# Step 3: Explode kill_chain_stages to get one row per (rule_id, technique_id, tactic_id, kill_chain_id)
+rule_kill_chains_df = (
+    rule_tactics_df.explode("kill_chain_stages")
+    .rename(columns={"kill_chain_stages": "kill_chain_stage"})
+    .copy()
+)
+# Enrich with kill_chain-level data (kill_chain_id, kill_chain_pretty)
+rule_kill_chains_df = rule_kill_chains_df.apply(enrich_kill_chain_data, axis=1)
+
+# Create pretty-formatted versions of the dataframes, on all aggregation levels.
+
+rule_tactics_pretty_df = (
+    rule_kill_chains_df.groupby(["rule_id", "technique_id", "tactic_id"])
+    .agg(
+        {
+            "ts_or_st_pretty": "first",
+            "tactic_pretty": "first",
+            "kill_chain_pretty": lambda x: tuple(
+                sorted(set(x))
+            ),  # Ordered unique values
+        }
+    )
+    .reset_index()
+    .rename(
+        columns={
+            "ts_or_st_pretty": "technique",
+            "tactic_pretty": "tactic",
+            "kill_chain_pretty": "kill_chain",
+        }
+    )
+)
+
+rule_techniques_pretty_df = (
+    rule_tactics_pretty_df.groupby(["rule_id", "technique_id"])
+    .agg(
+        {
+            "technique": "first",
+            "tactic": lambda x: tuple(sorted(set(x))),  # Ordered unique values
+            "kill_chain": lambda x: tuple(
+                sorted(set(item for tup in x for item in tup))
+            ),  # Flatten tuples and get unique values
+        }
+    )
+    .reset_index()
+)
+
+rules_pretty_df = (
+    rule_techniques_pretty_df.groupby("rule_id")
+    .agg(
+        {
+            "technique": lambda x: tuple(sorted(set(x))),  # Ordered unique values
+            "tactic": lambda x: tuple(
+                sorted(set(item for tup in x for item in tup))
+            ),  # Flatten tuples and get unique values
+            "kill_chain": lambda x: tuple(
+                sorted(set(item for tup in x for item in tup))
+            ),  # Flatten tuples and get unique values
+        }
+    )
+    .reset_index()
+)
+
+# For backwards compatibility with downstream code, create rules_df by aggregating rule_techniques_df
+# TODO: Update downstream code to use the new granular dataframes
 rules_df = (
     rule_techniques_df.groupby("rule_id")
     .agg(
         {
             "technique_id": list,
-            "technique": list,
-            "subtechnique": list,
-            "tactics": list,
-            "kill_chain_stages": list,
             "ts_or_st_pretty": list,
-            "tactics_pretty": list,
-            "kill_chain_pretty": list,
         }
     )
     .reset_index()
     .rename(
         columns={
             "technique_id": "technique_ids",
-            "technique": "techniques",
-            "subtechnique": "subtechniques",
             "ts_or_st_pretty": "ts_or_sts_pretty",
         }
     )
@@ -259,19 +327,19 @@ st.write(f"Showing {len(rules_df)} detection rules")
 # Create Tactic Coverage chart - Horizontal Stacked by Technique
 st.subheader("Tactic Coverage")
 
-# Explode tactics to get one row per rule-technique-tactic combination
-tactic_technique_df = rule_techniques_df.explode("tactics_pretty")
+# Use rule_tactics_df which already has tactic_pretty and ts_or_st_pretty
+tactic_technique_df = rule_tactics_df.copy()
 
 # Count rule mappings for each tactic-technique pair
 tactic_technique_counts = (
-    tactic_technique_df.groupby(["tactics_pretty", "ts_or_st_pretty"])
+    tactic_technique_df.groupby(["tactic_pretty", "ts_or_st_pretty"])
     .size()
     .reset_index(name="rule_mappings")
 )
 
 # Extract tactic name only (remove the ID prefix like "[TA0003] ")
 tactic_technique_counts["tactic_name"] = tactic_technique_counts[
-    "tactics_pretty"
+    "tactic_pretty"
 ].str.replace(r"^\[.*?\]\s*", "", regex=True)
 
 # Sort by canonical MITRE ATT&CK tactic order for chart consistency
@@ -288,7 +356,7 @@ tactic_chart = (
             title="Total rule mappings",
             axis=alt.Axis(
                 format="d",  # Format as integer (no decimals)
-            )
+            ),
         ),
         y=alt.Y(
             "tactic_name:N",
@@ -312,26 +380,91 @@ tactic_chart = (
 
 st.altair_chart(tactic_chart, use_container_width=True)
 
+# Create Kill Chain Coverage chart - Horizontal Stacked by Technique
+st.subheader("Kill Chain Coverage")
+
+# Use rule_kill_chains_df which already has kill_chain_pretty and ts_or_st_pretty
+kill_chain_technique_df = rule_kill_chains_df.copy()
+
+# Count rule mappings for each kill_chain-technique pair
+kill_chain_technique_counts = (
+    kill_chain_technique_df.groupby(["kill_chain_pretty", "ts_or_st_pretty"])
+    .size()
+    .reset_index(name="rule_mappings")
+)
+
+# Extract kill chain name and step number for sorting
+kill_chain_technique_counts["kill_chain_name"] = kill_chain_technique_counts[
+    "kill_chain_pretty"
+].str.replace(r"^\[.*?\]\s*", "", regex=True)
+
+# Get kill chain step numbers for proper ordering
+kill_chain_with_step = (
+    kill_chain_technique_df[["kill_chain_pretty", "kill_chain_id"]]
+    .drop_duplicates()
+    .set_index("kill_chain_pretty")["kill_chain_id"]
+    .to_dict()
+)
+
+# Add step numbers to counts dataframe and sort
+kill_chain_technique_counts["kill_chain_step"] = kill_chain_technique_counts[
+    "kill_chain_pretty"
+].map(kill_chain_with_step)
+
+# Sort by kill chain step number
+kill_chain_order = (
+    kill_chain_technique_counts[["kill_chain_pretty", "kill_chain_step"]]
+    .drop_duplicates()
+    .sort_values("kill_chain_step")["kill_chain_pretty"]
+    .tolist()
+)
+
+# Create the horizontal stacked bar chart
+kill_chain_chart = (
+    alt.Chart(kill_chain_technique_counts)
+    .mark_bar()
+    .encode(
+        x=alt.X(
+            "sum(rule_mappings):Q",
+            title="Total rule mappings",
+            axis=alt.Axis(
+                format="d",  # Format as integer (no decimals)
+            ),
+        ),
+        y=alt.Y(
+            "kill_chain_pretty:N",
+            title="Kill Chain Stage",
+            sort=kill_chain_order,
+            axis=alt.Axis(labelLimit=200),
+        ),
+        color=alt.Color(
+            "ts_or_st_pretty:N",
+            title="Technique",
+            legend=None,  # Hide legend as there are too many techniques
+        ),
+        tooltip=[
+            alt.Tooltip("kill_chain_pretty:N", title="Kill Chain Stage"),
+            alt.Tooltip("ts_or_st_pretty:N", title="Technique"),
+            alt.Tooltip("rule_mappings:Q", title="Rule mappings"),
+        ],
+    )
+    .properties(height=400)
+)
+
+st.altair_chart(kill_chain_chart, use_container_width=True)
+
 # Create Tactic vs Kill-Chain Heatmap
 st.subheader("Tactic / Kill-Chain Coverage")
 
-# Explode both tactics and kill_chain_stages to get one row per rule-tactic-killchain combination
-tactic_kc_df = rule_techniques_df.explode("tactics")
-tactic_kc_df = tactic_kc_df.explode("kill_chain_stages")
+# Use rule_kill_chains_df which already has all the data we need
+tactic_kc_df = rule_kill_chains_df.copy()
 
-# Filter out rows where tactics or kill_chain_stages are None
-tactic_kc_df = tactic_kc_df[
-    tactic_kc_df["tactics"].notna() & tactic_kc_df["kill_chain_stages"].notna()
-]
-
-# Extract tactic names and kill-chain names
-tactic_kc_df["tactic_name"] = tactic_kc_df["tactics"].apply(lambda t: t.name if t else None)
-tactic_kc_df["kill_chain_name"] = tactic_kc_df["kill_chain_stages"].apply(
-    lambda kc: f"[{kc.kill_chain_step_number}] {kc.name}" if kc else None
+# Extract tactic names and kill-chain names from the pretty formatted strings
+tactic_kc_df["tactic_name"] = tactic_kc_df["tactic_pretty"].str.replace(
+    r"^\[.*?\]\s*", "", regex=True
 )
-tactic_kc_df["kill_chain_step_num"] = tactic_kc_df["kill_chain_stages"].apply(
-    lambda kc: kc.kill_chain_step_number if kc else None
-)
+tactic_kc_df["kill_chain_name"] = tactic_kc_df["kill_chain_pretty"]
+tactic_kc_df["kill_chain_step_num"] = tactic_kc_df["kill_chain_id"]
 
 # Count unique rules for each tactic-killchain pair
 tactic_kc_counts = (
@@ -368,7 +501,9 @@ heatmap = (
             "tactic_name:N",
             title="Tactic",
             sort=tactic_sort_order,
-            scale=alt.Scale(domain=tactic_sort_order),  # Force all tactics to appear on axis
+            scale=alt.Scale(
+                domain=tactic_sort_order
+            ),  # Force all tactics to appear on axis
             axis=alt.Axis(labelLimit=300, labelOverlap=False),
         ),
         color=alt.Color(
@@ -387,22 +522,34 @@ heatmap = (
 
 st.altair_chart(heatmap, use_container_width=True)
 
-# Display dataframe of all rules
-st.dataframe(
-    rules_df[["rule_id", "ts_or_sts_pretty", "tactics_pretty", "kill_chain_pretty"]]
+# Display dataframe of all rules with aggregated tactics and kill chains
+rules_display_df = (
+    rule_kill_chains_df.groupby("rule_id")
+    .agg(
+        {
+            "ts_or_st_pretty": lambda x: list(set(x)),  # Unique techniques
+            "tactic_pretty": lambda x: list(set(x)),  # Unique tactics
+            "kill_chain_pretty": lambda x: list(set(x)),  # Unique kill chains
+        }
+    )
+    .reset_index()
 )
+
+st.dataframe(rules_pretty_df)
 
 # Create bar chart of top 20 techniques
 st.subheader("Top 20 Techniques by Rule Count")
 
-# Count techniques
-technique_counts = count_techniques(rules_df)
-
-# Convert to DataFrame and sort
-technique_df = pd.DataFrame(
-    list(technique_counts.items()), columns=["Technique", "Count"]
+# Count unique rules for each technique
+technique_counts = (
+    rule_techniques_df.groupby("ts_or_st_pretty")["rule_id"]
+    .nunique()
+    .reset_index(name="Count")
+    .rename(columns={"ts_or_st_pretty": "Technique"})
 )
-technique_df = technique_df.sort_values("Count", ascending=False).head(20)
+
+# Sort and get top 20
+technique_df = technique_counts.sort_values("Count", ascending=False).head(20)
 
 # Create horizontal bar chart with Altair to preserve sort order
 chart = (
